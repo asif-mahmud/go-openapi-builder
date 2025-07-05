@@ -128,6 +128,14 @@ func createLoader(doc openAPIDoc, fsys fs.FS) fs.WalkDirFunc {
 				compObj[parentDir] = compFieldObj
 			}
 
+			// check if field already exists in components > parent, if
+			// so exit early
+			if _, exists := compFieldObj[baseFilename]; exists {
+				return errors.New(
+					"field " + baseFilename + " already exists in components > " + parentDir + ". file: " + path,
+				)
+			}
+
 			compFieldObj[baseFilename] = partial
 
 			return nil
@@ -135,17 +143,42 @@ func createLoader(doc openAPIDoc, fsys fs.FS) fs.WalkDirFunc {
 
 		// if it's a path or webhook item, insert it into paths/webhooks field
 		if isPathOrWebhook {
-			var obj map[string]any
+			var pathLikeObj map[string]any
 			var ok bool
 
-			obj, ok = doc[parentDir].(map[string]any)
+			pathLikeObj, ok = doc[parentDir].(map[string]any)
 
 			if !ok {
-				obj = map[string]any{}
-				doc[parentDir] = obj
+				pathLikeObj = map[string]any{}
+				doc[parentDir] = pathLikeObj
 			}
 
-			maps.Copy(obj, partial)
+			for pathStr, op := range partial {
+				// if path doesn't exist in pathLikeObj
+				// simply copy cause its the first encounter of
+				// some operation
+				if _, exists := pathLikeObj[pathStr]; !exists {
+					maps.Copy(pathLikeObj, map[string]any{pathStr: op})
+					continue
+				}
+
+				existingPathOps := pathLikeObj[pathStr].(map[string]any)
+				ops := op.(map[string]any)
+
+				for op, opObj := range ops {
+					// if operation already exists in existingPathOps
+					// its a duplicacy, so exit early
+					if _, exists := existingPathOps[op]; exists {
+						return errors.New(
+							"operation " + op + " already exists in paths > " + pathStr + ". file: " + path,
+						)
+					}
+
+					// else insert new operation document
+					maps.Copy(existingPathOps, map[string]any{op: opObj})
+				}
+
+			}
 
 			return nil
 		}
@@ -168,7 +201,9 @@ func BuildFromFS(fss ...fs.FS) (io.Reader, error) {
 	doc := openAPIDoc{}
 
 	for _, fsys := range fss {
-		fs.WalkDir(fsys, ".", createLoader(doc, fsys))
+		if err := fs.WalkDir(fsys, ".", createLoader(doc, fsys)); err != nil {
+			return nil, err
+		}
 	}
 
 	buf, err := json.Marshal(doc)
